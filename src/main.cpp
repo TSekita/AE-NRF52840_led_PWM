@@ -2,10 +2,12 @@
 #include <stddef.h>
 #include <core_cm4.h>
 
-#define LED_PIN_NUM 9                // P1.09
-#define LED_PIN     ((1 << 5) | LED_PIN_NUM)  // 41 = (1 * 32 + 9)
+#define PWM_PIN (41UL)                // P1.09 = 32 + 9
 
-static uint16_t pwm_seq[1] = {0};   // デューティ比用バッファ
+#define STEP_COUNT 50
+#define STEP_DELAY_MS 100
+
+uint16_t buf[] = {0};  // 初期デューティ比0%
 
 void delay_us(uint32_t us) {
     SysTick->LOAD = (SystemCoreClock / 1000000) - 1;
@@ -44,46 +46,54 @@ extern "C" void *__wrap__calloc_r(void *, size_t n, size_t size) {
 }
 
 void pwm_init(void) {
-    NRF_P1->PIN_CNF[9] = (1 << 1);  // 出力
-
-    NRF_PWM0->PSEL.OUT[0] = ((1 << 5) | 9) | (0 << 31);  // P1.09に接続
-    NRF_PWM0->ENABLE = 1;
-    NRF_PWM0->MODE = PWM_MODE_UPDOWN_Up;
-    NRF_PWM0->PRESCALER = PWM_PRESCALER_PRESCALER_DIV_16;  // 1MHz
-    NRF_PWM0->COUNTERTOP = 1000;  // 周期 = 1ms = 1kHz
-
-    NRF_PWM0->SEQ[0].PTR = (uint32_t)pwm_seq;
-    NRF_PWM0->SEQ[0].CNT = 1;
-    NRF_PWM0->SEQ[0].REFRESH = 0;
-    NRF_PWM0->SEQ[0].ENDDELAY = 0;
-
-    NRF_PWM0->DECODER = (PWM_DECODER_LOAD_Individual << PWM_DECODER_LOAD_Pos) |
-                        (PWM_DECODER_MODE_RefreshCount << PWM_DECODER_MODE_Pos);
-
-    NRF_PWM0->LOOP = 0;
-    NRF_PWM0->SHORTS = PWM_SHORTS_LOOPSDONE_SEQSTART0_Enabled << PWM_SHORTS_LOOPSDONE_SEQSTART0_Pos;
-
-    NRF_PWM0->TASKS_SEQSTART[0] = 1;
+    // Start accurate HFCLK (XOSC)
+  NRF_CLOCK->TASKS_HFCLKSTART = 1;
+  while (NRF_CLOCK->EVENTS_HFCLKSTARTED == 0) ;
+  NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
+  
+  // Configure PWM_PIN as output, and set it to 0
+  NRF_GPIO->DIRSET = (1ULL << PWM_PIN);
+  NRF_GPIO->OUTCLR = (1ULL << PWM_PIN);
+  
+  
+  NRF_PWM0->PRESCALER   = PWM_PRESCALER_PRESCALER_DIV_16; // 1 us
+  NRF_PWM0->PSEL.OUT[0] = PWM_PIN;
+  NRF_PWM0->MODE        = (PWM_MODE_UPDOWN_Up << PWM_MODE_UPDOWN_Pos);
+  NRF_PWM0->DECODER     = (PWM_DECODER_LOAD_Common       << PWM_DECODER_LOAD_Pos) | 
+                          (PWM_DECODER_MODE_RefreshCount << PWM_DECODER_MODE_Pos);
+  NRF_PWM0->LOOP        = (PWM_LOOP_CNT_Disabled << PWM_LOOP_CNT_Pos);
+  
+  NRF_PWM0->COUNTERTOP = 20000; // 20ms period
+  
+  
+  NRF_PWM0->SEQ[0].CNT = ((sizeof(buf) / sizeof(uint16_t)) << PWM_SEQ_CNT_CNT_Pos);
+  NRF_PWM0->SEQ[0].ENDDELAY = 0;
+  NRF_PWM0->SEQ[0].PTR = (uint32_t)&buf[0];
+  NRF_PWM0->SEQ[0].REFRESH = 0;
+  NRF_PWM0->SHORTS = 0;
+  
+  NRF_PWM0->ENABLE = 1;
+  NRF_PWM0->TASKS_SEQSTART[0] = 1;
 }
-
-
 
 int main(void) {
     pwm_init();  // PWM初期化（COUNTERTOP=1000など）
 
     while (1) {
-        // Duty を 0 → 1000 に1秒かけて上げる（50ステップ × 20ms = 1s）
-        for (int duty = 0; duty <= 1000; duty += 20) {
-            pwm_seq[0] = duty;
+        // 上昇フェード（0 → 20000）
+        for (int i = 0; i <= STEP_COUNT; i++) {
+            uint16_t duty = (NRF_PWM0->COUNTERTOP * i) / STEP_COUNT;
+            buf[0] = duty;
             NRF_PWM0->TASKS_SEQSTART[0] = 1;
-            delay_ms(20);
+            delay_ms(STEP_DELAY_MS);
         }
 
-        // Duty を 1000 → 0 に1秒かけて下げる
-        for (int duty = 1000; duty >= 0; duty -= 20) {
-            pwm_seq[0] = duty;
+        // 下降フェード（20000 → 0）
+        for (int i = STEP_COUNT; i >= 0; i--) {
+            uint16_t duty = (NRF_PWM0->COUNTERTOP * i) / STEP_COUNT;
+            buf[0] = duty;
             NRF_PWM0->TASKS_SEQSTART[0] = 1;
-            delay_ms(20);
+            delay_ms(STEP_DELAY_MS);
         }
     }
 
